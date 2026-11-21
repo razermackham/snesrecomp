@@ -33,10 +33,43 @@ python snesrecomp_cli.py generate \
   [--no-host-root-scan] \
   [--source-root PATH]... \
   [--json-progress]
+
+python snesrecomp_cli.py discover \
+  --rom GAME.sfc \
+  --project-root /path/to/GameRecomp \
+  --build-dir build/headless \
+  --run-dir discovery/run \
+  --frames 6000 \
+  [--input-script route.txt] \
+  [--cfg-dir recomp] \
+  [--program-manifest src/gen/program_manifest.json] \
+  [--write-candidates] \
+  [--apply] \
+  [--skip-build] \
+  [--headless-exe PATH [--headless-exe-arg ARG]...] \
+  [--expected-crc32 ...] \
+  [--expected-sha256 ...] \
+  [--json-progress]
 ```
 
 `build` remains the greenfield scaffolder (new empty project). `generate`
 targets an existing title that already has `bank*.cfg` seeds.
+
+`discover` is the automated coverage loop: it verifies the ROM, configures and
+builds the project's headless target (`-DSNESRECOMP_HEADLESS=ON`, no window, no
+audio device, no `SDL_Init`), runs it with tier-2 capture enabled, joins the
+capture against the program manifest of *that same build*, writes
+`<run-dir>/report.json` and appends `emit = true` seeds to
+`<cfg-dir>/symbols.toml`. `--apply` then regenerates C and rebuilds, so the new
+seeds are in the next executable. Gate-passing hits are promoted; everything
+else is a ranked, report-only candidate unless `--write-candidates` opts into
+`emit = false` (force-LLE) rows. See
+[Expanding code coverage](COVERAGE_EXPANSION.md) for the gates and the report
+schema.
+
+`discover` needs a program manifest that matches the captured build. A
+regenerated manifest describes different code, so the run is rejected with
+exit 1 instead of joining observations to analysis that never produced them.
 
 ## Exit codes
 
@@ -53,10 +86,11 @@ Stdout is reserved for one JSON object per line. Useful events:
 
 | `event` | Notes |
 |---------|--------|
-| `phase` | `phase`, optional `pct` / `message` (`verify`, `emit`, `sync_funcs_h`, `done`) |
+| `phase` | `phase`, optional `pct` / `message` (`verify`, `emit`, `sync_funcs_h`, `done` for `generate`; `verify`, `configure`, `build`, `run`, `analyze`, `regenerate`, `rebuild`, `done` for `discover`) |
 | `rom` | digests after verification |
+| `capture` | tier-2 artifacts a `discover` run produced |
 | `log` | mirrored tool chatter |
-| `result` | final payload (`ok`, `rom`, `out_dir`, …) |
+| `result` | final payload (`ok`, `rom`, `out_dir`, …; `discover` adds `report`, `seeds`, `summary`, `applied`) |
 | `error` | `message`, `code`, optional `details` |
 
 Human-readable text goes to stderr when JSON progress is enabled.

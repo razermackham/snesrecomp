@@ -76,6 +76,18 @@ impl DemandEdge {
 }
 
 #[derive(Debug, Clone)]
+struct BoundaryExit {
+    site_pc24: u32,
+    target: VariantKey,
+}
+
+impl BoundaryExit {
+    fn json(&self) -> Value {
+        json!({"site_pc24": self.site_pc24, "target": self.target.json()})
+    }
+}
+
+#[derive(Debug, Clone)]
 struct NodeSummary {
     key: VariantKey,
     disposition: &'static str,
@@ -84,6 +96,12 @@ struct NodeSummary {
     max_pc24: u32,
     demands: Vec<DemandEdge>,
     reasons: Vec<String>,
+    /// Control-flow leaves intentionally stopped at a declared boundary.  These
+    /// are the static exit facts coverage discovery reports; they are also
+    /// present as `declared_boundary` demands, but exporting them separately
+    /// keeps the boundary classification explicit for consumers that do not
+    /// want to parse demand details.
+    boundary_exits: Vec<BoundaryExit>,
 }
 
 impl NodeSummary {
@@ -95,6 +113,7 @@ impl NodeSummary {
             "min_pc24": self.min_pc24,
             "max_pc24": self.max_pc24,
             "demands": self.demands.iter().map(DemandEdge::json).collect::<Vec<_>>(),
+            "boundary_exits": self.boundary_exits.iter().map(BoundaryExit::json).collect::<Vec<_>>(),
             // Digests are deliberately backend-local cache keys.  The
             // compatibility checker excludes them from semantic comparison.
             "reasons": self.reasons,
@@ -830,6 +849,16 @@ fn summarize(
     } else {
         edges.into_iter().collect()
     };
+    let mut boundary_exits: Vec<BoundaryExit> = graph
+        .boundary_exits
+        .iter()
+        .map(|&(site, ref target_key)| BoundaryExit {
+            site_pc24: site & 0xFFFFFF,
+            target: VariantKey::new(target_key.pc, target_key.m, target_key.x),
+        })
+        .collect();
+    boundary_exits.sort_by_key(|exit| (exit.site_pc24, exit.target));
+    boundary_exits.dedup_by_key(|exit| (exit.site_pc24, exit.target));
     NodeSummary {
         key,
         disposition,
@@ -838,6 +867,7 @@ fn summarize(
         max_pc24: pcs.iter().copied().max().unwrap_or(key.pc24),
         demands,
         reasons: reasons.into_iter().collect(),
+        boundary_exits,
     }
 }
 
@@ -1357,6 +1387,7 @@ fn analyze(
                         max_pc24: key.pc24,
                         demands: Vec::new(),
                         reasons: vec!["decode_budget_exhausted".to_string()],
+                        boundary_exits: Vec::new(),
                     },
                 );
                 continue;

@@ -5,6 +5,10 @@ transfer fell back, and which exact entry variants merit fresh analysis.
 It does not certify that generated code is correct. Promotion requires a
 build and a replay comparison, followed by gameplay validation.
 
+This page covers the capture format and the ingest contract. For the working
+loop — finding code the game reaches and turning it into seeds, by hand or
+headlessly — see [Expanding code coverage](COVERAGE_EXPANSION.md).
+
 ## Enable capture
 
 The engine-owned mod `snesrecomp.diagnostics.coverage` is hidden and off by

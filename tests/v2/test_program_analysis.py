@@ -162,3 +162,33 @@ def test_cross_bank_long_jump_is_an_exact_tail_demand():
     assert edge.kind == EdgeKind.DIRECT_TAIL_CALL
     assert edge.target == VariantKey(0x009000, 0, 1)
     assert edge.target in manifest.nodes
+
+
+def test_declared_boundary_exit_is_exported_and_round_trips():
+    """Static exit facts are reported alongside demands without a version bump."""
+    rom = make_lorom_bank0({
+        # Falls through past end:$8002 into the declared sibling.
+        0x8000: bytes([0xA9, 0x01]),  # LDA #$01
+        0x8002: bytes([0x60]),        # RTS
+    })
+    manifest = _analyze(rom, [
+        "func Root 8000 end:8002 entry_mx:1,1",
+        "func Next 8002 entry_mx:1,1",
+    ])
+    root = manifest.nodes[VariantKey(0x008000, 1, 1)]
+
+    assert len(root.boundary_exits) == 1
+    boundary = root.boundary_exits[0]
+    assert boundary.site_pc24 == 0x008000
+    assert boundary.target == VariantKey(0x008002, 1, 1)
+    # The same edge is still a declared-boundary demand for the emitter.
+    assert any(edge.detail == "declared_boundary" for edge in root.demands)
+
+    value = json.loads(manifest.to_json())
+    assert value["format_version"] == 3
+    wire = value["nodes"]["008000:M1X1"]["boundary_exits"]
+    assert wire == [{
+        "site_pc24": 0x008000,
+        "target": {"pc24": 0x008002, "m": 1, "x": 1},
+    }]
+    assert ProgramManifest.from_dict(value).to_dict() == manifest.to_dict()

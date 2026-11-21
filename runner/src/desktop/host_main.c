@@ -55,6 +55,7 @@
 
 #include "types.h"
 #include "common_rtl.h"
+#include "input_script.h"
 #include "cpu_state.h"
 #include "cpu_trace.h"
 #include "common_cpu_infra.h"
@@ -768,338 +769,10 @@ static void PreparePpuFrame(void) {
 }
 
 // --- Scripted input ---
-typedef struct {
-  uint32 mask;      // button bits to hold
-  int hold_frames;  // frames to hold mask (0 = release)
-  int wait_frames;  // frames to wait after hold ends before next entry
-  uint32 poke_addr; // script-only WRAM write address
-  uint8 *poke_bytes;
-  int poke_count;
-  /* until/until16: WRAM condition, checked at each frame boundary. */
-  uint8 cond_width;   // 1 or 2 bytes
-  uint8 cond_ne;      // 0: ==, 1: !=
-  uint16 cond_value;
-  int cond_timeout;   // frames
-  int cond_waited;
-  char *dump_tag;     // dump <tag>
-  uint32 host_command; // optional zero-frame presentation command
-  bool save_state;   // loadstate entry instead saves, without opening a modal UI
-} ScriptEntry;
-
-/* Entry kinds carried in the high bits of ScriptEntry.mask. The zero-frame
- * kinds (until, dump, quit) run at the boundary where their wait ends and
- * then fall straight through to the next command: they consume no frame of
- * their own and leave no release frame behind. */
-enum {
-  kScriptLoadState = 0x80000000u,
-  kScriptPoke      = 0x40000000u,
-  kScriptForcePoke = 0x20000000u,
-  kScriptReset     = 0x10000000u,
-  kScriptUntil     = 0x08000000u,
-  kScriptDump      = 0x04000000u,
-  kScriptQuit      = 0x02000000u,
-  kScriptHostControl = 0x01000000u,
-  kScriptZeroFrame = kScriptUntil | kScriptDump | kScriptQuit | kScriptHostControl,
-};
-static int g_script_quit;        // quit reached: the main loop exits
-static int g_script_failed;      // an until timed out: exit code 3
-
-typedef struct {
-  uint32 addr;
-  uint8 *bytes;
-  int count;
-} ScriptForcePoke;
-
-static ScriptEntry *g_script_entries;
-static int g_script_count;
-static int g_script_index;    // current entry
-static int g_script_phase;    // 0=holding, 1=waiting
-static int g_script_counter;  // frames left in current phase
-static uint32 g_script_controllers;  // scripted ports stay connected while idle
-static ScriptForcePoke *g_script_force_pokes;
-static int g_script_force_poke_count;
-static int g_script_force_poke_cap;
-
-static uint32 ParseButtonMask(const char *name) {
-  const char *sep = strpbrk(name, "+,|");
-  if (sep) {
-    uint32 mask = 0;
-    const char *p = name;
-    while (*p) {
-      size_t len = strcspn(p, "+,|");
-      char part[32];
-      if (len == 0 || len >= sizeof(part))
-        return 0;
-      memcpy(part, p, len);
-      part[len] = 0;
-      mask |= ParseButtonMask(part);
-      p += len;
-      if (*p)
-        p++;
-    }
-    return mask;
-  }
-
-  /* Prefix each button independently: right+p2:right+b+p2:b. The default
-   * remains P1, preserving existing scripts and the oracle's P1 syntax. */
-  if (name[0] == 'p' && (name[1] == '1' || name[1] == '2') && name[2] == ':')
-    return (ParseButtonMask(name + 3) & 0x0fffu) << (name[1] == '2' ? 12 : 0);
-
-  if (strcmp(name, "start")  == 0) return 0x0008;
-  if (strcmp(name, "select") == 0) return 0x0004;
-  if (strcmp(name, "up")     == 0) return 0x0010;
-  if (strcmp(name, "down")   == 0) return 0x0020;
-  if (strcmp(name, "left")   == 0) return 0x0040;
-  if (strcmp(name, "right")  == 0) return 0x0080;
-  if (strcmp(name, "a")      == 0) return 0x0100;
-  if (strcmp(name, "b")      == 0) return 0x0001;
-  if (strcmp(name, "x")      == 0) return 0x0200;
-  if (strcmp(name, "y")      == 0) return 0x0002;
-  if (strcmp(name, "l")      == 0) return 0x0400;
-  if (strcmp(name, "r")      == 0) return 0x0800;
-  fprintf(stderr, "script: unknown button '%s'\n", name);
-  return 0;
-}
-
-static int ParseHexByte(const char *s, uint8 *out) {
-  int hi = HexNibble(s[0]), lo = HexNibble(s[1]);
-  if (hi < 0 || lo < 0)
-    return 0;
-  *out = (uint8)((hi << 4) | lo);
-  return 1;
-}
-
-static uint8 *ParseHexBytes(uint32 addr, const char *hex, int *out_count) {
-  size_t hex_len = strlen(hex);
-  int byte_count = (int)(hex_len / 2);
-  if ((hex_len & 1) || byte_count <= 0 || addr + byte_count > 0x20000u)
-    return NULL;
-
-  uint8 *bytes = (uint8 *)malloc((size_t)byte_count);
-  if (!bytes)
-    return NULL;
-  for (int i = 0; i < byte_count; i++) {
-    if (!ParseHexByte(hex + i * 2, &bytes[i])) {
-      free(bytes);
-      return NULL;
-    }
-  }
-  *out_count = byte_count;
-  return bytes;
-}
-
-static void AddScriptForcePoke(uint32 addr, uint8 *bytes, int count) {
-  if (g_script_force_poke_count >= g_script_force_poke_cap) {
-    g_script_force_poke_cap = g_script_force_poke_cap
-        ? g_script_force_poke_cap * 2 : 8;
-    g_script_force_pokes = (ScriptForcePoke *)realloc(
-        g_script_force_pokes,
-        (size_t)g_script_force_poke_cap * sizeof(ScriptForcePoke));
-  }
-  ScriptForcePoke *p = &g_script_force_pokes[g_script_force_poke_count++];
-  p->addr = addr;
-  p->bytes = bytes;
-  p->count = count;
-}
-
-static void ApplyScriptForcePokes(void) {
-  for (int i = 0; i < g_script_force_poke_count; i++) {
-    ScriptForcePoke *p = &g_script_force_pokes[i];
-    if (p->bytes && p->count > 0 &&
-        p->addr + (uint32)p->count <= 0x20000u)
-      memcpy(g_ram + p->addr, p->bytes, (size_t)p->count);
-  }
-}
-
-static ScriptEntry *NewScriptEntry(int *cap) {
-  if (g_script_count >= *cap) {
-    *cap *= 2;
-    g_script_entries = (ScriptEntry *)realloc(g_script_entries, (size_t)*cap * sizeof(ScriptEntry));
-  }
-  ScriptEntry *e = &g_script_entries[g_script_count++];
-  memset(e, 0, sizeof(*e));
-  return e;
-}
-
-/* Script grammar, one command per line, `#` comments:
- *   wait N                  frames before the next command
- *   press <buttons> [N]     hold a+b+... for N frames (default 1)
- *                           prefix P2 buttons with p2:, e.g. right+p2:right
- *   loadstate N             load save-state slot N
- *   savestate N             save slot N while the game keeps running
- *   reset                   the Reset hotkey's console reset
- *   turbo on|off            change the held-Turbo state at this frame boundary
- *   renderer toggle         invoke the renderer hotkey at this boundary
- *   poke <addr> <hex>       write WRAM bytes for one frame
- *   pokefor <addr> <hex> N  write WRAM bytes for N frames
- *   forcepoke <addr> <hex>  write WRAM bytes every frame from now on
- *   until <addr> <op> <hex> [timeout]    block until the WRAM byte at <addr>
- *   until16 <addr> <op> <hex> [timeout]  (or LE word) compares; op is == or
- *                           !=; timeout in frames (default 36000) exits 3
- *   dump <tag>              write the scene state dump (state_dump.h) for the
- *                           frame just completed into $SNESRECOMP_DUMP_DIR
- *   quit                    exit the process
- *
- * The same file drives the snesref oracle (tools/snesref/README.md), with
- * the same per-frame meaning: every hold-type entry is followed by one idle
- * frame, and until/dump/quit consume no frames. */
-static void LoadScript(const char *path) {
-  FILE *f = fopen(path, "r");
-  if (!f) { fprintf(stderr, "script: cannot open '%s'\n", path); return; }
-
-  int cap = 64;
-  g_script_entries = (ScriptEntry *)malloc(cap * sizeof(ScriptEntry));
-  g_script_count = 0;
-
-  char line[256];
-  // pending wait accumulates between press commands
-  int pending_wait = 0;
-  while (fgets(line, sizeof(line), f)) {
-    // strip comment and newline
-    char *c = strchr(line, '#'); if (c) *c = 0;
-    char cmd[64], arg1[64];
-    int n = 0;
-    if (sscanf(line, "%63s %63s %d", cmd, arg1, &n) < 1) continue;
-    if (strcmp(cmd, "wait") == 0) {
-      int frames = (sscanf(line, "%*s %d", &n) == 1) ? n : 0;
-      pending_wait += frames;
-    } else if (strcmp(cmd, "turbo") == 0) {
-      if (sscanf(line, "%*s %63s", arg1) != 1 ||
-          (strcmp(arg1, "on") != 0 && strcmp(arg1, "off") != 0)) {
-        fprintf(stderr, "script: expected 'turbo on' or 'turbo off': %s", line);
-        g_script_failed = g_script_quit = 1;
-        continue;
-      }
-      ScriptEntry *e = NewScriptEntry(&cap);
-      e->mask = kScriptHostControl | (strcmp(arg1, "on") == 0 ? 1u : 0u);
-      e->wait_frames = pending_wait;
-      pending_wait = 0;
-    } else if (strcmp(cmd, "renderer") == 0) {
-      if (sscanf(line, "%*s %63s", arg1) != 1 || strcmp(arg1, "toggle")) {
-        fprintf(stderr, "script: expected 'renderer toggle': %s", line);
-        g_script_failed = g_script_quit = 1;
-        continue;
-      }
-      ScriptEntry *e = NewScriptEntry(&cap);
-      e->mask = kScriptHostControl;
-      e->host_command = kKeys_ToggleRenderer;
-      e->wait_frames = pending_wait;
-      pending_wait = 0;
-    } else if (strcmp(cmd, "loadstate") == 0 || strcmp(cmd, "savestate") == 0) {
-      int slot = 0;
-      sscanf(line, "%*s %d", &slot);
-      ScriptEntry *e = NewScriptEntry(&cap);
-      e->mask = kScriptLoadState | (slot & 0xF);
-      e->save_state = strcmp(cmd, "savestate") == 0;
-      e->hold_frames = 1;
-      e->wait_frames = pending_wait;
-      pending_wait = 0;
-    } else if (strcmp(cmd, "reset") == 0) {
-      ScriptEntry *e = NewScriptEntry(&cap);
-      e->mask = kScriptReset;
-      e->hold_frames = 1;
-      e->wait_frames = pending_wait;
-      pending_wait = 0;
-    } else if (strcmp(cmd, "forcepoke") == 0) {
-      unsigned addr = 0;
-      char hex[256] = {0};
-      if (sscanf(line, "%*s %x %255s", &addr, hex) != 2)
-        continue;
-      int byte_count = 0;
-      uint8 *bytes = ParseHexBytes(addr, hex, &byte_count);
-      if (!bytes)
-        continue;
-      ScriptEntry *e = NewScriptEntry(&cap);
-      e->mask = kScriptForcePoke;
-      e->hold_frames = 1;
-      e->wait_frames = pending_wait;
-      e->poke_addr = addr;
-      e->poke_bytes = bytes;
-      e->poke_count = byte_count;
-      pending_wait = 0;
-    } else if (strcmp(cmd, "poke") == 0 || strcmp(cmd, "pokefor") == 0) {
-      unsigned addr = 0;
-      char hex[256] = {0};
-      int hold = 1;
-      int matched = strcmp(cmd, "pokefor") == 0
-          ? sscanf(line, "%*s %x %255s %d", &addr, hex, &hold)
-          : sscanf(line, "%*s %x %255s", &addr, hex);
-      if (matched < 2)
-        continue;
-      if (hold < 1)
-        hold = 1;
-      int byte_count = 0;
-      uint8 *bytes = ParseHexBytes(addr, hex, &byte_count);
-      if (!bytes)
-        continue;
-      ScriptEntry *e = NewScriptEntry(&cap);
-      e->mask = kScriptPoke;
-      e->hold_frames = hold;
-      e->wait_frames = pending_wait;
-      e->poke_addr = addr;
-      e->poke_bytes = bytes;
-      e->poke_count = byte_count;
-      pending_wait = 0;
-    } else if (strcmp(cmd, "until") == 0 || strcmp(cmd, "until16") == 0) {
-      unsigned addr = 0, value = 0;
-      char op[8] = {0};
-      int timeout = 36000;
-      int matched = sscanf(line, "%*s %x %7s %x %d", &addr, op, &value, &timeout);
-      int width = strcmp(cmd, "until16") == 0 ? 2 : 1;
-      if (matched < 3 || addr + (unsigned)width > 0x20000u ||
-          (strcmp(op, "==") != 0 && strcmp(op, "!=") != 0)) {
-        fprintf(stderr, "script: bad %s line: %s", cmd, line);
-        continue;
-      }
-      ScriptEntry *e = NewScriptEntry(&cap);
-      e->mask = kScriptUntil;
-      e->poke_addr = addr;
-      e->cond_width = (uint8)width;
-      e->cond_ne = op[0] == '!';
-      e->cond_value = (uint16)value;
-      e->cond_timeout = timeout;
-      e->wait_frames = pending_wait;
-      pending_wait = 0;
-    } else if (strcmp(cmd, "dump") == 0) {
-      if (sscanf(line, "%*s %63s", arg1) != 1) continue;
-      ScriptEntry *e = NewScriptEntry(&cap);
-      e->mask = kScriptDump;
-      e->dump_tag = strdup(arg1);
-      e->wait_frames = pending_wait;
-      pending_wait = 0;
-    } else if (strcmp(cmd, "quit") == 0) {
-      ScriptEntry *e = NewScriptEntry(&cap);
-      e->mask = kScriptQuit;
-      e->wait_frames = pending_wait;
-      pending_wait = 0;
-    } else if (strcmp(cmd, "press") == 0) {
-      int hold = (sscanf(line, "%*s %*s %d", &n) == 1) ? n : 1;
-      ScriptEntry *e = NewScriptEntry(&cap);
-      e->mask = ParseButtonMask(arg1);
-      if (e->mask & 0x000fffu) g_script_controllers |= 1u;
-      if (e->mask & 0xfff000u) g_script_controllers |= 2u;
-      e->hold_frames = hold;
-      e->wait_frames = pending_wait;
-      pending_wait = 0;
-    } else {
-      fprintf(stderr, "script: unknown command '%s'\n", cmd);
-    }
-  }
-  fclose(f);
-
-  if (g_script_count > 0) {
-    g_script_index = 0;
-    g_script_phase = 1; // start with the wait_frames of first entry
-    g_script_counter = g_script_entries[0].wait_frames;
-    fprintf(stderr, "script: loaded %d entries from '%s'\n", g_script_count, path);
-  }
-}
-
-static bool ScriptCondHolds(const ScriptEntry *e) {
-  uint16 v = g_ram[e->poke_addr];
-  if (e->cond_width == 2) v |= (uint16)(g_ram[e->poke_addr + 1] << 8);
-  return (v == e->cond_value) != (e->cond_ne != 0);
-}
+/* The grammar and its per-frame state machine are shared with the headless
+ * discovery host (runner/src/input_script.h). This file supplies only the
+ * actions that are the desktop host's own. */
+static SnesInputScript g_script;
 
 static void ScriptDump(const char *tag, unsigned frame) {
   const char *dir = getenv("SNESRECOMP_DUMP_DIR");
@@ -1109,97 +782,51 @@ static void ScriptDump(const char *tag, unsigned frame) {
   fprintf(stderr, "script f=%u dump %s %s\n", frame, tag, rc ? "partial" : "ok");
 }
 
-static uint32 TickScript(void) {
-  ApplyScriptForcePokes();
+static void ScriptDumpEntry(void *user, const char *tag, unsigned frame) {
+  (void)user;
+  ScriptDump(tag, frame);
+}
 
-  for (;;) {
-  if (!g_script_entries || g_script_index >= g_script_count)
-    return 0;
+static void ScriptLoadState(void *user, int slot, bool save) {
+  (void)user;
+  RtlSaveLoad(save ? kSaveLoad_Save : kSaveLoad_Load, slot);
+  if (!save) GameReset();
+}
 
-  ScriptEntry *e = &g_script_entries[g_script_index];
+static void ScriptConsoleReset(void *user) {
+  (void)user;
+  ConsoleReset();
+}
 
-  if (g_script_phase == 1) {
-    // waiting
-    if (g_script_counter > 0) { g_script_counter--; return 0; }
-    // done waiting — start hold
-    g_script_phase = 0;
-    g_script_counter = e->hold_frames;
-  }
+static void ScriptSetTurbo(void *user, bool on) {
+  (void)user;
+  g_turbo = on;
+  fprintf(stderr, "script f=%u turbo %s\n", (unsigned)snes_frame_counter,
+          g_turbo ? "on" : "off");
+}
 
-  if (g_script_phase == 0 && (e->mask & kScriptZeroFrame)) {
-    const unsigned frame = (unsigned)snes_frame_counter;
-    if (e->mask & kScriptUntil) {
-      if (!ScriptCondHolds(e)) {
-        if (++e->cond_waited > e->cond_timeout) {
-          fprintf(stderr, "script f=%u until %05X timed out after %d frames\n",
-                  frame, e->poke_addr, e->cond_timeout);
-          g_script_failed = 1;
-          g_script_quit = 1;
-        }
-        return 0;
-      }
-      fprintf(stderr, "script f=%u until %05X ok after %d frames\n", frame,
-              e->poke_addr, e->cond_waited);
-    } else if (e->mask & kScriptDump) {
-      ScriptDump(e->dump_tag, frame);
-    } else if (e->mask & kScriptHostControl) {
-      if (e->host_command) {
-        HandleCommand(e->host_command, true);
-        fprintf(stderr, "script f=%u renderer=%s\n", frame,
-                snesrecomp_desktop_new_renderer() ? "new" : "reference");
-      } else {
-        g_turbo = (e->mask & 1u) != 0;
-        fprintf(stderr, "script f=%u turbo %s\n", frame, g_turbo ? "on" : "off");
-      }
-    } else {
-      fprintf(stderr, "script f=%u quit\n", frame);
-      g_script_quit = 1;
-    }
-    g_script_index++;
-    if (g_script_index < g_script_count) {
-      g_script_phase = 1;
-      g_script_counter = g_script_entries[g_script_index].wait_frames;
-    }
-    if (g_script_quit) return 0;
-    continue;   // zero-frame: the next command starts at this boundary
-  }
+static void ScriptToggleRenderer(void *user) {
+  (void)user;
+  HandleCommand(kKeys_ToggleRenderer, true);
+  fprintf(stderr, "script f=%u renderer=%s\n", (unsigned)snes_frame_counter,
+          snesrecomp_desktop_new_renderer() ? "new" : "reference");
+}
 
-  if (g_script_phase == 0) {
-    if (g_script_counter > 0) {
-      g_script_counter--;
-      if (e->mask & kScriptLoadState) {
-        RtlSaveLoad(e->save_state ? kSaveLoad_Save : kSaveLoad_Load, e->mask & 0xF);
-        if (!e->save_state) GameReset();
-        return 0;
-      }
-      if (e->mask & kScriptReset) {
-        ConsoleReset();
-        return 0;
-      }
-      if (e->mask & kScriptPoke) {
-        if (e->poke_bytes && e->poke_count > 0 &&
-            e->poke_addr + (uint32)e->poke_count <= 0x20000u)
-          memcpy(g_ram + e->poke_addr, e->poke_bytes, (size_t)e->poke_count);
-        return 0;
-      }
-      if (e->mask & kScriptForcePoke) {
-        if (e->poke_bytes && e->poke_count > 0)
-          AddScriptForcePoke(e->poke_addr, e->poke_bytes, e->poke_count);
-        return 0;
-      }
-      return e->mask;
-    }
-    // hold done — advance
-    g_script_index++;
-    if (g_script_index < g_script_count) {
-      e = &g_script_entries[g_script_index];
-      g_script_phase = 1;
-      g_script_counter = e->wait_frames;
-    }
-    return 0;
-  }
-  return 0;
-  }
+static const SnesInputScriptHost kScriptHost = {
+    .user = NULL,
+    .load_state = ScriptLoadState,
+    .console_reset = ScriptConsoleReset,
+    .set_turbo = ScriptSetTurbo,
+    .toggle_renderer = ScriptToggleRenderer,
+    .dump = ScriptDumpEntry,
+};
+
+static void LoadScript(const char *path) {
+  SnesInputScriptLoad(&g_script, path);
+}
+
+static uint32_t TickScript(void) {
+  return SnesInputScriptTick(&g_script, &kScriptHost);
 }
 
 void NORETURN Die(const char *error) {
@@ -4588,9 +4215,9 @@ error_reading:;
      * iteration that opened a panel consumed a script frame the guest never
      * saw, and every later scripted press landed a frame early. */
     inputs |= TickScript();
-    if (g_script_quit) {
+    if (g_script.quit) {
       running = false;
-      exit_reason = g_script_failed ? "script until timed out" : "script quit";
+      exit_reason = g_script.failed ? "script until timed out" : "script quit";
       break;
     }
     inputs |= debug_server_get_controller_inputs();
@@ -4613,7 +4240,7 @@ error_reading:;
       else
         runahead_captured = true;   /* it rasterised the speculated frame */
     }
-    ApplyScriptForcePokes();
+    SnesInputScriptApplyForcePokes(&g_script);
     snes_osd_note_frame();
     ProfileEnd(kProfileGuest, profile_start);
     frameCtr++;
@@ -4797,7 +4424,7 @@ error_reading:;
     }
     host_report_breadcrumb("in-game launcher: restarted");
   }
-  return g_script_failed ? 3 : 0;
+  return g_script.failed ? 3 : 0;
 }
 
 /* ── Input plumbing ───────────────────────────────────────────────────────── */
@@ -4963,7 +4590,7 @@ static void RequestScreenshot(void) {
 }
 
 static uint32 GetActiveControllers(void) {
-  uint32 ctrl = g_script_controllers |
+  uint32 ctrl = g_script.controllers |
                 (g_config.player_src[0] == 1 ? 1u : 0u) |
                 (g_config.player_src[1] == 1 ? 2u : 0u);
   ctrl |= g_gamepad[0].joystick_id != -1 ? 1 : 0;

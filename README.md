@@ -344,6 +344,8 @@ Useful technical references:
 
 - [`docs/MULTI_TIER.md`](docs/MULTI_TIER.md) — static and interpreted execution
   tiers.
+- [`docs/COVERAGE_EXPANSION.md`](docs/COVERAGE_EXPANSION.md) — the manual and
+  headless loop that turns runtime coverage into analysis seeds.
 - [`docs/LLE_FIRST_ANALYSIS.md`](docs/LLE_FIRST_ANALYSIS.md) — analysis policy
   and the low-level correctness floor.
 - [`docs/HLE_FUNC.md`](docs/HLE_FUNC.md) — replacing a recompiled routine

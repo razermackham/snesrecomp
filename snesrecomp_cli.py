@@ -25,17 +25,20 @@ for path in (ROOT, ROOT / "recompiler", ROOT / "tools"):
 
 from snes65816 import detect_rom_mapping, load_rom  # noqa: E402
 from tools import v2_emit  # noqa: E402
-# generate / verify-rom are the documented headless contract
+# generate / verify-rom / discover are the documented headless contract
 # (docs/LOCAL_CODEGEN_SDK.md): one JSON object per line on stdout, exit 3 on a
 # ROM digest mismatch. tools/sdk_generate.py is that contract's only
 # implementation -- this front end must not grow a second one, because the copy
 # that lived here shipped without --json-progress and every launcher-driven
 # rebuild died with "unrecognized arguments: --json-progress" (exit 2).
+# discover is orchestration around tools/discover_report.py, which stays the
+# only implementation of the promotion gates and the seed writer.
 from tools.sdk_generate import (  # noqa: E402
     EXIT_ERROR,
     add_generate_parser,
     add_verify_parser,
 )
+from tools.sdk_discover import add_discover_parser  # noqa: E402
 from tools.sdk_progress import ProgressReporter  # noqa: E402
 
 
@@ -339,6 +342,7 @@ def parser() -> argparse.ArgumentParser:
 
     add_generate_parser(commands)
     add_verify_parser(commands)
+    add_discover_parser(commands)
 
     resolve = commands.add_parser(
         "resolve-rom", help="print the ROM a scaffolded project generates from")
@@ -357,7 +361,7 @@ def main() -> int:
 
     # The SDK commands own their own ProgressReporter and exit codes (0/1/2/3,
     # docs/LOCAL_CODEGEN_SDK.md); build is the interactive scaffolder.
-    if arguments.command in ("generate", "verify-rom"):
+    if arguments.command in ("generate", "verify-rom", "discover"):
         progress = ProgressReporter(
             json_progress=bool(getattr(arguments, "json_progress", False)),
         )

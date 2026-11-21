@@ -3,6 +3,13 @@
 The TOML contains names and tier choices, never instruction bytes. Keep manual
 cfg directives outside the marked blocks. Explicit AOT roots are returned to
 the emitter so emit=true does not depend on --cfg-roots or vector reachability.
+
+A function may appear more than once for the same 24-bit address when the
+runtime reaches it under different entry widths.  Rows are therefore keyed by
+``(pc24, entry_m, entry_x)``; every qualified variant is written to the cfg as
+its own ``func`` line (the analyzer already accepts sibling variants).  The
+``emit`` tier is a property of the address, so all rows for one pc24 must agree
+on it.
 """
 
 from __future__ import annotations
@@ -62,7 +69,7 @@ def load_symbols(path: Path) -> list[FunctionSymbol]:
         raise ValueError(f"{path}: expected [[func]] tables")
     result = []
     names = {}
-    addresses = {}
+    policies = {}
     for index, item in enumerate(functions, 1):
         context = f"{path}: func #{index}"
         if not isinstance(item, dict):
@@ -86,14 +93,19 @@ def load_symbols(path: Path) -> list[FunctionSymbol]:
         if previous is not None and previous != symbol.pc24:
             raise ValueError(f"{context}: name already used at ${previous:06X}")
         names[name] = symbol.pc24
-        policy = (emit, symbol.entry_m, symbol.entry_x)
-        previous = addresses.get(symbol.pc24)
-        if previous is not None and previous != policy:
-            raise ValueError(f"{context}: conflicting tier/entry modes at ${symbol.pc24:06X}")
-        addresses[symbol.pc24] = policy
+        # A second row for the same address is a different entry-width
+        # variant; only the AOT tier must stay uniform for the whole address
+        # because force_lle and symbol directives are per pc24.
+        previous = policies.get(symbol.pc24)
+        if previous is not None and previous != emit:
+            raise ValueError(
+                f"{context}: conflicting tier at ${symbol.pc24:06X} "
+                f"(emit differs from an earlier row)")
+        policies[symbol.pc24] = emit
         if symbol not in result:
             result.append(symbol)
-    return sorted(result, key=lambda s: (s.bank, s.addr, s.name))
+    return sorted(result,
+                  key=lambda s: (s.bank, s.addr, s.name, s.entry_m, s.entry_x))
 
 
 def _split_block(text: str, path: Path):
@@ -148,14 +160,22 @@ def sync_symbols(cfg_dir: Path) -> list[FunctionSymbol]:
             cfg = load_bank_cfg(str(manual))
         if cfg.bank != bank:
             raise ValueError(f"{path}: bank field does not match filename")
-        entries = {entry.start: entry for entry in cfg.entries}
+        # A hand-owned func declaration stays authoritative for its whole
+        # address: it may carry end:/tail_call:/exit_mx: contracts that a
+        # generated sibling variant would not inherit.  Managed rows still
+        # get one func per (m, x) variant, deduplicated by that key.
+        manual_starts = {entry.start for entry in cfg.entries}
+        entries = {(entry.start, entry.entry_m, entry.entry_x)
+                   for entry in cfg.entries}
         forced = set(cfg.force_lle)
         lines = [BEGIN]
         for symbol in by_bank.get(bank, []):
-            if symbol.emit and symbol.addr not in entries:
+            variant = (symbol.addr, symbol.entry_m, symbol.entry_x)
+            if (symbol.emit and symbol.addr not in manual_starts
+                    and variant not in entries):
                 lines.append(f"func {symbol.name} {symbol.addr:04x} "
                              f"entry_mx:{symbol.entry_m},{symbol.entry_x}")
-                entries[symbol.addr] = symbol
+                entries.add(variant)
             else:
                 lines.append(f"symbol {symbol.pc24:06x} {symbol.name}")
             if not symbol.emit and symbol.pc24 not in forced:

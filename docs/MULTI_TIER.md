@@ -39,6 +39,8 @@ interpreter work and recover new static evidence through the supported tools.
 Never claim native execution merely because an address has a registered body.
 
 - [Coverage feedback](COVERAGE_FEEDBACK.md) documents discovery and regeneration.
+- [Expanding code coverage](COVERAGE_EXPANSION.md) is the manual and headless
+  loop that turns runtime hits into analysis seeds.
 - [Exit-width contracts](EXIT_WIDTH_CONTRACTS.md) describe safe width selection.
 - [Disassembly authority](DISASSEMBLY_AUTHORITY.md) separates ROM facts from
   annotations and analysis guesses.

@@ -288,6 +288,7 @@ set(SNESRECOMP_RUNNER_SOURCES
     ${SNESRECOMP_RUNNER_ROOT}/src/diagnostics/trace_writer.c
     ${SNESRECOMP_RUNNER_ROOT}/src/diagnostics/replay_writer.c
     ${SNESRECOMP_RUNNER_ROOT}/src/host_args.c
+    ${SNESRECOMP_RUNNER_ROOT}/src/input_script.c
     ${SNESRECOMP_RUNNER_ROOT}/src/launcher.c
     ${SNESRECOMP_RUNNER_ROOT}/src/launcher_cache.c
     ${SNESRECOMP_RUNNER_ROOT}/src/launcher_picker.c
@@ -1366,6 +1367,59 @@ function(snesrecomp_target_desktop_host target)
         target_link_libraries(${target} PRIVATE m)
     endif()
     snesrecomp_guard_header_shadowing(${target})
+endfunction()
+
+# ── Headless discovery host ────────────────────────────────────────────────
+#
+# A separate target, not a runtime flag on the desktop build. The desktop host
+# would still create a GL context, open an audio device and pace against a wall
+# clock; "headless" there would be a promise it cannot keep. This target links
+# the same runtime and recompiled code, runs one production frame per iteration
+# (RtlRunFrame + the title's draw_ppu_frame, so raster/HDMA/raster IRQ still
+# run) and never calls SDL_Init.
+#
+# It may LINK SDL: shared runtime translation units include the SDL shim header,
+# and linking a library is not initialising it.
+#
+#   add_executable(MyGameHeadless
+#       ${SNESRECOMP_RUNNER_SOURCES}
+#       <the game's runtime sources: game_rtl.c, host_contract.c, ...>
+#       <NOT the desktop main.c>)
+#   snesrecomp_target_headless(MyGameHeadless ${CMAKE_SOURCE_DIR}/src/gen)
+#
+# The title's RtlGameInfo is named kGameInfo by convention; a project that
+# names it differently sets SNESRECOMP_HEADLESS_GAME_INFO on the target.
+option(SNESRECOMP_HEADLESS
+    "Build the headless discovery host (no window, no audio device, no SDL_Init)"
+    OFF)
+
+function(snesrecomp_target_headless target gen_dir)
+    set(options TIER2)
+    cmake_parse_arguments(HL "${options}" "" "" ${ARGN})
+    target_sources(${target} PRIVATE
+        ${SNESRECOMP_RUNNER_ROOT}/src/headless/headless_main.c
+        ${SNESRECOMP_RUNNER_ROOT}/src/headless/headless_glue.c)
+    target_include_directories(${target} PRIVATE
+        ${SNESRECOMP_RUNNER_ROOT}/src/headless
+        # common_rtl.c includes config.h, whose desktop contract lives here.
+        ${SNESRECOMP_RUNNER_ROOT}/src/desktop)
+    target_compile_definitions(${target} PRIVATE SNESRECOMP_HEADLESS=1)
+    snesrecomp_target_generated_code(${target} ${gen_dir})
+    if(HL_TIER2)
+        snesrecomp_target_post_mortem(${target} TIER2)
+    else()
+        snesrecomp_target_post_mortem(${target})
+    endif()
+    # Linking SDL gives the shared runtime the include directory and link
+    # target its SDL shim needs. The headless main never calls SDL_Init.
+    snesrecomp_target_sdl(${target})
+    if(NOT MSVC)
+        target_link_libraries(${target} PRIVATE m)
+    endif()
+    snesrecomp_guard_header_shadowing(${target})
+    message(STATUS
+        "${target}: HEADLESS -- no window, no audio device, deterministic "
+        "frame loop")
 endfunction()
 
 # Optional delay-sync netcode (lib/recomp-net submodule). See docs/RECOMP_NET.md.

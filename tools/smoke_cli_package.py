@@ -123,6 +123,19 @@ def main() -> int:
         header = (output / "config" / "funcs.h").read_text(encoding="utf-8")
         if "func FixtureReset 8000" not in cfg or "void FixtureReset(" not in header:
             raise RuntimeError("packaged generate did not synchronize symbols.toml")
+
+        # discover is part of the shipped SDK contract. A package that dropped
+        # the module or the subcommand would fail in a player's discovery run
+        # rather than here.
+        discover_help = subprocess.run(
+            [str(executable), "discover", "--help"],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if (discover_help.returncode != 0 or
+                "--program-manifest" not in discover_help.stdout):
+            raise RuntimeError(
+                "packaged CLI does not answer `discover --help`: "
+                f"rc={discover_help.returncode}\n"
+                f"stdout:\n{discover_help.stdout}\nstderr:\n{discover_help.stderr}")
     print("packaged CLI smoke test passed")
     return 0
 

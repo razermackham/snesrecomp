@@ -98,6 +98,8 @@ def main() -> int:
         # packaged snesrecomp cannot even import, and generate could not sync
         # funcs.h.
         (ROOT / "tools" / "sdk_generate.py", "tools"),
+        (ROOT / "tools" / "sdk_discover.py", "tools"),
+        (ROOT / "tools" / "discover_report.py", "tools"),
         (ROOT / "tools" / "sdk_progress.py", "tools"),
         (ROOT / "tools" / "sdk_rom.py", "tools"),
         (ROOT / "tools" / "v2_sync_funcs_h.py", "tools"),

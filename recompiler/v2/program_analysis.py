@@ -67,6 +67,17 @@ class DemandEdge:
         object.__setattr__(self, "site_pc24", self.site_pc24 & 0xFFFFFF)
 
 
+@dataclass(frozen=True, order=True)
+class BoundaryExit:
+    """A static control-flow leave stopped at a declared function boundary."""
+
+    site_pc24: int
+    target: VariantKey
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "site_pc24", self.site_pc24 & 0xFFFFFF)
+
+
 @dataclass(frozen=True)
 class NodeSummary:
     key: VariantKey
@@ -77,6 +88,7 @@ class NodeSummary:
     demands: Tuple[DemandEdge, ...] = ()
     reasons: Tuple[str, ...] = ()
     digest: str = ""
+    boundary_exits: Tuple[BoundaryExit, ...] = ()
 
     @property
     def propagates_demands(self) -> bool:
@@ -125,6 +137,10 @@ class ProgramManifest:
                 "min_pc24": node.min_pc24,
                 "max_pc24": node.max_pc24,
                 "demands": [edge_dict(e) for e in node.demands],
+                "boundary_exits": [
+                    {"site_pc24": e.site_pc24, "target": key_dict(e.target)}
+                    for e in node.boundary_exits
+                ],
                 "reasons": list(node.reasons),
                 "digest": node.digest,
             }
@@ -189,6 +205,13 @@ class ProgramManifest:
                             if edge.get("target") is not None else None),
                     detail=str(edge.get("detail", "")),
                 ))
+            boundary_exits = tuple(
+                BoundaryExit(
+                    site_pc24=int(exit_item["site_pc24"]),
+                    target=parse_key(exit_item["target"]),
+                )
+                for exit_item in item.get("boundary_exits", ())
+            )
             nodes[key] = NodeSummary(
                 key=key,
                 disposition=NodeDisposition(item["disposition"]),
@@ -199,6 +222,7 @@ class ProgramManifest:
                 reasons=tuple(str(reason)
                               for reason in item.get("reasons", ())),
                 digest=str(item.get("digest", "")),
+                boundary_exits=boundary_exits,
             )
         exit_modes = {
             parse_manifest_key(text_key): (int(item["m"]), int(item["x"]))

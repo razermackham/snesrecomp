@@ -172,10 +172,41 @@ decision rather than a surprise.
    analysis roots without needing `--cfg-roots`. Edit the TOML, keeping manual
    cfg directives outside its generated blocks.
    Python older than 3.11 needs `python -m pip install tomli` to read the TOML.
+
+   A function the game reaches at more than one entry width gets one `[[func]]`
+   row per variant, repeating `name`/`addr` and changing `entry_m`/`entry_x`:
+
+   ```toml
+   [[func]]
+   name = "DispatchRoutine"
+   addr = "9319"
+   bank = 0xc0
+   emit = true
+   entry_m = 1
+   entry_x = 1
+
+   [[func]]
+   name = "DispatchRoutine"
+   addr = "9319"
+   bank = 0xc0
+   emit = true
+   entry_m = 0
+   entry_x = 1
+   ```
+
+   Each row becomes its own `func ... entry_mx:M,X` line; `funcs.h` still
+   declares the one shared name. `emit` is per address, so all rows for one
+   `addr` must agree on it. A hand-written `func` for that address stays
+   authoritative (its `end:`/`exit_mx:` contract wins) and the rows become
+   `symbol` aliases instead.
 3. **Resolve dispatch misses after every run, before anything else.** An
    unresolved indirect target is the reason a port diverges, and it is cheap
    to fix early and expensive to fix late.
-4. **Never edit `src/gen/` by hand,** and never synthesise a result to get
+4. **Let a route find the rest.** Build the headless target and run
+   `snesrecomp_cli.py discover` over a scripted route: it records where the
+   interpreter took over, promotes the hits that pass the gates, and ranks the
+   rest. See [Expanding code coverage](COVERAGE_EXPANSION.md).
+5. **Never edit `src/gen/` by hand,** and never synthesise a result to get
    past uncovered code. Fix the config, the analyzer, or the runtime, and
    regenerate. An invented value turns a loud failure into a silent wrong one.
 

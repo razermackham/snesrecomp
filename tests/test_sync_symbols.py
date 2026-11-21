@@ -22,6 +22,16 @@ def write_symbols(cfg, *entries):
     (cfg / "symbols.toml").write_text(text, encoding="utf-8")
 
 
+def write_variant_rows(cfg, *rows):
+    """rows: (name, bank, addr, emit, entry_m, entry_x)."""
+    text = ""
+    for name, bank, addr, emit, entry_m, entry_x in rows:
+        text += (f'[[func]]\nname = "{name}"\nbank = {bank}\n'
+                 f'addr = "{addr:04x}"\nemit = {str(emit).lower()}\n'
+                 f'entry_m = {entry_m}\nentry_x = {entry_x}\n')
+    (cfg / "symbols.toml").write_text(text, encoding="utf-8")
+
+
 def test_sync_multibank_preserves_manual_cfg_and_removes_stale_symbols(tmp_path):
     manual = "bank = c0\nfunc Manual 1000 entry_mx:0,0\n"
     path = tmp_path / "bankc0.cfg"
@@ -128,6 +138,64 @@ def test_existing_uppercase_cfg_and_manual_tier_override_are_preserved(tmp_path)
     assert (cfg.entries[0].entry_m, cfg.entries[0].entry_x) == (0, 1)
     assert cfg.force_lle == {0xc00200}
     assert path.read_text().startswith(manual)
+
+
+def test_multi_variant_rows_emit_every_entry_width(tmp_path):
+    """One function reached at four entry widths yields four func lines."""
+    write_variant_rows(
+        tmp_path,
+        ("Routine", 0xc0, 0x9319, True, 1, 1),
+        ("Routine", 0xc0, 0x9319, True, 0, 1),
+        ("Routine", 0xc0, 0x9319, True, 1, 0),
+        ("Routine", 0xc0, 0x9319, True, 0, 0),
+    )
+    sync_symbols(tmp_path)
+    cfg = load_bank_cfg(str(tmp_path / "bankc0.cfg"))
+    assert {(e.name, e.start, e.entry_m, e.entry_x) for e in cfg.entries} == {
+        ("Routine", 0x9319, 1, 1),
+        ("Routine", 0x9319, 0, 1),
+        ("Routine", 0x9319, 1, 0),
+        ("Routine", 0x9319, 0, 0),
+    }
+    # funcs.h still declares one name covering all variants.
+    assert collect_function_names(tmp_path) == [("Routine", 0xc09319)]
+
+
+def test_multi_variant_lle_rows_share_one_force_lle(tmp_path):
+    write_variant_rows(
+        tmp_path,
+        ("Slow", 0xc2, 0x9319, False, 1, 1),
+        ("Slow", 0xc2, 0x9319, False, 0, 0),
+    )
+    sync_symbols(tmp_path)
+    cfg = load_bank_cfg(str(tmp_path / "bankc2.cfg"))
+    assert [(s.name, s.addr_24) for s in cfg.symbols] == [
+        ("Slow", 0xc29319), ("Slow", 0xc29319)]
+    assert cfg.force_lle == {0xc29319}
+
+
+def test_manual_entry_at_address_wins_over_symbol_rows(tmp_path):
+    """A hand-owned func keeps its end:/exit_mx: contract; rows become aliases."""
+    path = tmp_path / "bankc0.cfg"
+    path.write_text("bank = c0\nfunc Manual 9319 end:9320 entry_mx:1,1\n")
+    write_variant_rows(tmp_path, ("Routine", 0xc0, 0x9319, True, 1, 0))
+    sync_symbols(tmp_path)
+    cfg = load_bank_cfg(str(path))
+    assert {(e.name, e.entry_m, e.entry_x, e.end) for e in cfg.entries} == {
+        ("Manual", 1, 1, 0x9320)}
+    assert [(s.name, s.addr_24) for s in cfg.symbols] == [
+        ("Routine", 0xc09319)]
+
+
+def test_conflicting_emit_across_variants_fails(tmp_path):
+    write_variant_rows(
+        tmp_path,
+        ("Routine", 0xc0, 0x9319, True, 1, 1),
+        ("Routine", 0xc0, 0x9319, False, 0, 0),
+    )
+    with pytest.raises(ValueError, match="conflicting tier"):
+        sync_symbols(tmp_path)
+    assert not (tmp_path / "bankc0.cfg").exists()
 
 
 def test_cli_generates_unreachable_hirom_symbol_and_honors_tier_toggle(tmp_path):

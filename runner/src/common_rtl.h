@@ -289,6 +289,13 @@ void RtlSaveLoad(int cmd, int slot);
 void RtlApuLock();
 void RtlApuUnlock();
 void RtlRenderAudio(int16 *audio_buffer, int samples, int channels);
+/* Deterministic audio consumer for hosts with no audio thread (the headless
+ * discovery host). With no consumer the SPC starves; this models one at the
+ * exact SNES sample rate, so the run stays deterministic. Off by default, and
+ * unaffected by SNES_COSIM_AUDIO, which remains the co-simulation build's
+ * environment switch. */
+void RtlSetDeterministicAudio(int enabled);
+void RtlDrainAudioFrame(void);
 /* Report the rate the host actually opened the audio device at, so the consumer
  * can convert the SPC's native 32040 Hz onto it. MUST be called from host audio
  * init (before the device is unpaused) by any host whose rate is configurable —
