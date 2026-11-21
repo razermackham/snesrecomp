@@ -30,6 +30,11 @@ jobs:
         run: python tools/build_native_analyzer.py
       - name: Smoke test headless generate / verify-rom contract
         run: python tools/smoke_sdk_generate.py
+      # discover is the automated coverage loop (docs/COVERAGE_EXPANSION.md).
+      # It imports the report module the packaged CLI must also ship, so the
+      # route is exercised here rather than first in a player's discovery run.
+      - name: Smoke test headless discover route
+        run: python tools/smoke_sdk_discover.py
       - name: Install packager
         run: python -m pip install pyinstaller==6.21.0
       - name: Build CLI package
