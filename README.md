@@ -374,8 +374,10 @@ intentionally share those device implementations.
 
 ### Independent libretro reference
 
-Build the small SDL2 frontend, then provide an emulator core DLL and a legally
+Build the small SDL2 frontend, then provide an emulator core and a legally
 obtained ROM at runtime:
+
+**Windows (PowerShell):**
 
 ```powershell
 cd tools\snesref
@@ -388,6 +390,17 @@ $env:SNESREF_WAV = "reference.wav"
 .\snesref.exe C:\cores\bsnes_libretro.dll C:\roms\game.sfc
 ```
 
+**Linux / macOS:**
+
+```sh
+cd tools/snesref
+./build.sh
+
+SNESREF_FAST=1 SNESREF_FRAMES=1800 \
+SNESREF_TRACE_FILE=wram.jsonl SNESREF_WAV=reference.wav \
+./snesref /path/to/snes9x_libretro.so /path/to/game.sfc
+```
+
 For reproducible gameplay, set `SNESREF_INPUT_FILE` to a text file containing
 `start-frame:duration:hex-mask`, one event per line. The mask layout is
 `B,Y,Select,Start,Up,Down,Left,Right,A,X,L,R` from bit 0 through bit 11. Frame
@@ -397,13 +410,15 @@ dumps are controlled by `SNESREF_FRAME_DUMP_DIR` and the optional
 interface.
 
 The frontend source and MIT-licensed `libretro.h` are tracked. Emulator cores,
-SDL binaries, ROMs, firmware, captures, and `snesref.exe` are not tracked or
-included in releases. In particular, bsnes is GPLv3 and Snes9x has a
-non-commercial license; developers supply either one separately.
+SDL binaries, ROMs, firmware, captures, and `snesref`/`snesref.exe` build
+outputs are not tracked or included in releases. In particular, bsnes is GPLv3
+and Snes9x has a non-commercial license; developers supply either one separately.
 
 ### Internal TCP co-simulation
 
 The reference-only target does not need a game checkout:
+
+**Windows (PowerShell):**
 
 ```powershell
 cmake -S cosim -B build\cosim-ref -G Ninja `
@@ -417,14 +432,37 @@ cmake --build build\cosim-ref --target smw_cosim_ref
   --frames 1800 --final-frame-dump reference.raw
 ```
 
+**Linux / macOS:**
+
+```sh
+cmake -S cosim -B build/cosim-ref -G Ninja \
+  -DSNES_COSIM_REF_ONLY=ON \
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build build/cosim-ref --target smw_cosim_ref
+
+./build/cosim-ref/smw_cosim_ref /path/to/game.sfc \
+  --frames 1800 --final-frame-dump reference.raw
+```
+
 Despite its historical target name, `smw_cosim_ref` is the game-neutral
 interpreter side. For lockstep comparison, build the game-specific A-side
 co-sim target and let the coordinator launch both processes:
+
+**Windows (PowerShell):**
 
 ```powershell
 python tools\snes_cosim.py `
   --a-cmd "build/cosim/smw_cosim.exe C:/roms/smw.sfc" `
   --b-cmd "build/cosim/smw_cosim_ref.exe C:/roms/smw.sfc" `
+  --stride 1 --max 3600
+```
+
+**Linux / macOS:**
+
+```sh
+python3 tools/snes_cosim.py \
+  --a-cmd "build/cosim/smw_cosim /path/to/smw.sfc" \
+  --b-cmd "build/cosim-ref/smw_cosim_ref /path/to/smw.sfc" \
   --stride 1 --max 3600
 ```
 

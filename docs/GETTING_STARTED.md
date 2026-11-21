@@ -8,11 +8,25 @@ The worked path is **Windows x64, Visual Studio 2022 and PowerShell**. Keep
 the first attempt simple: one unmodified ROM revision, the standard launcher
 and the original game presentation. Add enhancements after the game works.
 
+**Linux / macOS:** the framework and tooling also work on POSIX hosts. Use
+`sh tools/new_project/setup_project.sh ...` instead of
+`setup_project.ps1`, `sh tools/generate_ci.sh ...` instead of
+`generate_ci.ps1`, `./tools/snesref/build.sh` instead of `build.bat`, and
+`bash tools/regen.sh --rom /path/to/game.sfc` for regeneration. Test runners
+that previously required PowerShell now have `.sh` equivalents alongside their
+`.ps1` scripts (for example `tests/run_native_runtime.sh`,
+`tests/ppu/run.sh`, and per-test `tests/*/run.sh`). Install Git, Python 3.11+,
+a C/C++ toolchain, CMake, Ninja/Make, and Rust 1.85+ (`cargo`) via your system
+package manager, then follow the same ROM, setup, generation, and build flow
+with POSIX paths and commands.
+
 If you only want to play an existing port, choose a title in the
 [game list](../README.md#games), open its download page and follow that
 project's ROM-selection instructions. You do not need to create a project.
 
 ## 1. Install the tools once
+
+### Windows
 
 Install these before opening your terminal:
 
@@ -38,8 +52,20 @@ cargo --version
 cmake --version
 ```
 
-Each command should print a version. Fix a missing tool before continuing;
-opening a fresh Developer PowerShell often resolves a newly installed PATH.
+### Linux / macOS
+
+Install Git, Python 3.11+, a C/C++ compiler, CMake, Ninja or Make, and Rust
+1.85+ (`cargo` via [rustup](https://rust-lang.org/tools/install/)) using your
+platform package manager. Then verify:
+
+```sh
+git --version
+python3 --version
+cargo --version
+cmake --version
+```
+
+Each command should print a version. Fix a missing tool before continuing.
 You do not need a separate SDL installation: the default build can download
 and build the framework's pinned SDL3 dependency.
 
